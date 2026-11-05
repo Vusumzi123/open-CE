@@ -1,0 +1,10 @@
+[package]
+name = "oce-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "TES4-family plugin (ESM/ESP/ESL) reader for Skyrim Special Edition"
+
+[dependencies]
+oce-core = { workspace = true }
+flate2 = { workspace = true }

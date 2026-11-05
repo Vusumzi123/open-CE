@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/oce-core",
+    "crates/oce-plugin",
+    "crates/oce-bsa",
+    "crates/oce-data",
+    "crates/oce-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Open CE contributors"]
+rust-version = "1.80"
+
+[workspace.dependencies]
+oce-core = { path = "crates/oce-core" }
+oce-plugin = { path = "crates/oce-plugin" }
+oce-bsa = { path = "crates/oce-bsa" }
+oce-data = { path = "crates/oce-data" }
+flate2 = "1.1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

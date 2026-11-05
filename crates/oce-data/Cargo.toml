@@ -1,0 +1,11 @@
+[package]
+name = "oce-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Skyrim Special Edition data directory, load order and asset resolution"
+
+[dependencies]
+oce-core = { workspace = true }
+oce-plugin = { workspace = true }
+oce-bsa = { workspace = true }

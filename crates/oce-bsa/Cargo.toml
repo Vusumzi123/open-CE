@@ -1,0 +1,9 @@
+[package]
+name = "oce-bsa"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "BSA v105 archive reader with LZ4 frame support"
+
+[dependencies]
+oce-core = { workspace = true }
