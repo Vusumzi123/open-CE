@@ -600,7 +600,7 @@ mod tests {
     }
 
     fn flat_terrain() -> Terrain {
-        Terrain::flat_test()
+        Terrain::flat()
     }
 
     #[test]

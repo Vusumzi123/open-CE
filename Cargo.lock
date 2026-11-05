@@ -1366,12 +1366,12 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
- "half",
  "image",
  "minifb",
  "oce-bsa",
  "oce-core",
  "oce-data",
+ "oce-nif",
  "oce-plugin",
  "pollster",
  "wgpu",
@@ -1389,6 +1389,15 @@ dependencies = [
  "oce-bsa",
  "oce-core",
  "oce-plugin",
+]
+
+[[package]]
+name = "oce-nif"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "half",
+ "oce-core",
 ]
 
 [[package]]

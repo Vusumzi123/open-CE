@@ -5,6 +5,7 @@ members = [
     "crates/oce-plugin",
     "crates/oce-bsa",
     "crates/oce-data",
+    "crates/oce-nif",
     "crates/oce-cli",
 ]
 
@@ -20,6 +21,7 @@ oce-core = { path = "crates/oce-core" }
 oce-plugin = { path = "crates/oce-plugin" }
 oce-bsa = { path = "crates/oce-bsa" }
 oce-data = { path = "crates/oce-data" }
+oce-nif = { path = "crates/oce-nif" }
 flate2 = "1.1"
 
 [profile.release]

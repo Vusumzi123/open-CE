@@ -1,22 +1,15 @@
 use std::collections::HashMap;
-use std::error::Error;
 
 use glam::{EulerRot, Quat, Vec3};
-use half::f16;
 use oce_core::Result;
 use oce_data::Game;
+use oce_nif::Nif;
 use oce_plugin::{Plugin, Record, WalkEntry};
+
+pub use oce_nif::MeshVertex;
 
 const TAMRIEL: u32 = 0x0000_003C;
 const TARGET_CELL: u32 = 0x0000_99A2;
-
-#[derive(Clone)]
-pub struct MeshVertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-    pub uv: [f32; 2],
-    pub color: [f32; 3],
-}
 
 pub struct SceneObject {
     pub vertices: Vec<MeshVertex>,
@@ -59,7 +52,7 @@ impl Scene {
         let wanted: std::collections::HashSet<u32> =
             refs.iter().map(|reference| reference.base).collect();
         let base_models = base_models(plugin, &wanted)?;
-        let mut cache: HashMap<String, NifMesh> = HashMap::new();
+        let mut cache: HashMap<String, Vec<oce_nif::MeshPart>> = HashMap::new();
         let mut objects = Vec::new();
         let mut loaded_models = 0;
         let mut failed_models = 0;
@@ -82,8 +75,8 @@ impl Scene {
                         continue;
                     }
                 };
-                let mesh = match parse_nif(&bytes) {
-                    Ok(mesh) => mesh,
+                let mesh = match Nif::parse(&bytes) {
+                    Ok(nif) => nif.meshes(),
                     Err(_) => {
                         failed_models += 1;
                         continue;
@@ -93,7 +86,7 @@ impl Scene {
                 cache.insert(model.clone(), mesh.clone());
                 mesh
             };
-            if mesh.meshes.is_empty() {
+            if mesh.is_empty() {
                 continue;
             }
             let rotation = Quat::from_euler(
@@ -102,50 +95,89 @@ impl Scene {
                 reference.rotation[1],
                 reference.rotation[2],
             );
-            let scale = reference.scale;
-            for part in mesh.meshes {
-                let mut vertices = part.vertices;
-                for vertex in &mut vertices {
-                    let position = rotation * (Vec3::from_array(vertex.position) * scale)
-                        + Vec3::from_array(reference.position);
-                    vertex.position = Vec3::new(position.x, position.z, position.y).to_array();
-                    let normal = rotation * Vec3::from_array(vertex.normal);
-                    vertex.normal = Vec3::new(normal.x, normal.z, normal.y).to_array();
-                }
-                objects.push(SceneObject {
-                    vertices,
-                    indices: part.indices,
-                    texture: part.texture,
-                });
+            for part in mesh {
+                push_part(
+                    &mut objects,
+                    part,
+                    rotation,
+                    Vec3::from_array(reference.position),
+                    reference.scale,
+                );
             }
         }
 
-        let mut textures = HashMap::new();
-        let mut failed_textures = 0;
-        for path in objects.iter().filter_map(|object| object.texture.as_ref()) {
-            if textures.contains_key(path) {
-                continue;
-            }
-            let Some(bytes) = game.read_asset(path)? else {
-                failed_textures += 1;
-                continue;
+        let (textures, failed_textures) = load_textures(game, &objects)?;
+        Ok(Self {
+            objects,
+            textures,
+            loaded_models,
+            failed_models,
+            failed_textures,
+        })
+    }
+
+    pub fn load_test_cell(game: &Game) -> Result<Self> {
+        const MODELS: &[(&str, [f32; 3], [f32; 3], f32)] = &[
+            (
+                "meshes\\architecture\\farmhouse\\farmhouse01.nif",
+                [600.0, 600.0, 0.0],
+                [0.0, 0.6, 0.0],
+                1.0,
+            ),
+            (
+                "meshes\\architecture\\farmhouse\\farmhouse01walkway.nif",
+                [1400.0, 600.0, 0.0],
+                [0.0, 0.6, 0.0],
+                1.0,
+            ),
+            (
+                "meshes\\landscape\\rocks\\wetrocks\\rockl01wet.nif",
+                [1800.0, 1400.0, 0.0],
+                [0.0, 0.0, 0.0],
+                1.0,
+            ),
+            (
+                "meshes\\landscape\\trees\\treepineforest01.nif",
+                [1000.0, 1800.0, 0.0],
+                [0.0, 0.0, 0.0],
+                1.0,
+            ),
+            (
+                "meshes\\actors\\character\\character assets\\femalebodyastrid_0.nif",
+                [2000.0, 2000.0, 0.0],
+                [0.0, 0.0, 0.0],
+                1.0,
+            ),
+        ];
+
+        let mut objects = Vec::new();
+        let mut loaded_models = 0;
+        let mut failed_models = 0;
+
+        for &(path, origin, rotation, scale) in MODELS {
+            let bytes = match game.read_asset(path) {
+                Ok(Some(bytes)) => bytes,
+                _ => {
+                    failed_models += 1;
+                    continue;
+                }
             };
-            match image::load_from_memory_with_format(&bytes, image::ImageFormat::Dds) {
-                Ok(image) => {
-                    let image = image.to_rgba8();
-                    textures.insert(
-                        path.clone(),
-                        TextureData {
-                            width: image.width(),
-                            height: image.height(),
-                            rgba: image.into_raw(),
-                        },
-                    );
+            let nif = match Nif::parse(&bytes) {
+                Ok(nif) => nif,
+                Err(_) => {
+                    failed_models += 1;
+                    continue;
                 }
-                Err(_) => failed_textures += 1,
+            };
+            loaded_models += 1;
+            let rotation = Quat::from_euler(EulerRot::XYZ, rotation[0], rotation[1], rotation[2]);
+            let origin = Vec3::from_array(origin);
+            for part in nif.meshes() {
+                push_part(&mut objects, part, rotation, origin, scale);
             }
         }
 
+        let (textures, failed_textures) = load_textures(game, &objects)?;
         Ok(Self {
             objects,
             textures,
@@ -156,16 +188,57 @@ impl Scene {
     }
 }
 
-#[derive(Clone)]
-struct NifMesh {
-    meshes: Vec<MeshPart>,
+fn push_part(
+    objects: &mut Vec<SceneObject>,
+    part: oce_nif::MeshPart,
+    rotation: Quat,
+    origin: Vec3,
+    scale: f32,
+) {
+    let mut vertices = part.vertices;
+    for vertex in &mut vertices {
+        let position = rotation * (Vec3::from_array(vertex.position) * scale) + origin;
+        vertex.position = Vec3::new(position.x, position.z, position.y).to_array();
+        let normal = rotation * Vec3::from_array(vertex.normal);
+        vertex.normal = Vec3::new(normal.x, normal.z, normal.y).to_array();
+    }
+    objects.push(SceneObject {
+        vertices,
+        indices: part.indices,
+        texture: part.texture,
+    });
 }
 
-#[derive(Clone)]
-struct MeshPart {
-    vertices: Vec<MeshVertex>,
-    indices: Vec<u32>,
-    texture: Option<String>,
+fn load_textures(
+    game: &Game,
+    objects: &[SceneObject],
+) -> Result<(HashMap<String, TextureData>, usize)> {
+    let mut textures = HashMap::new();
+    let mut failed_textures = 0;
+    for path in objects.iter().filter_map(|object| object.texture.as_ref()) {
+        if textures.contains_key(path) {
+            continue;
+        }
+        let Some(bytes) = game.read_asset(path)? else {
+            failed_textures += 1;
+            continue;
+        };
+        match image::load_from_memory_with_format(&bytes, image::ImageFormat::Dds) {
+            Ok(image) => {
+                let image = image.to_rgba8();
+                textures.insert(
+                    path.clone(),
+                    TextureData {
+                        width: image.width(),
+                        height: image.height(),
+                        rgba: image.into_raw(),
+                    },
+                );
+            }
+            Err(_) => failed_textures += 1,
+        }
+    }
+    Ok((textures, failed_textures))
 }
 
 struct Reference {
@@ -173,33 +246,6 @@ struct Reference {
     position: [f32; 3],
     rotation: [f32; 3],
     scale: f32,
-}
-
-#[derive(Clone, Copy)]
-struct Transform {
-    translation: Vec3,
-    rotation: glam::Mat3,
-    scale: f32,
-}
-
-impl Transform {
-    const IDENTITY: Self = Self {
-        translation: Vec3::ZERO,
-        rotation: glam::Mat3::IDENTITY,
-        scale: 1.0,
-    };
-
-    fn apply(&self, point: Vec3) -> Vec3 {
-        self.translation + self.rotation * (point * self.scale)
-    }
-
-    fn then(&self, child: &Transform) -> Self {
-        Self {
-            translation: self.apply(child.translation),
-            rotation: self.rotation * child.rotation,
-            scale: self.scale * child.scale,
-        }
-    }
 }
 
 fn base_models(
@@ -337,396 +383,4 @@ fn keep_model(model: &str) -> bool {
     ]
     .iter()
     .any(|part| lower.contains(part))
-}
-
-fn parse_nif(data: &[u8]) -> std::result::Result<NifMesh, Box<dyn Error>> {
-    let mut cursor = Cursor::new(data);
-    let line_end = data
-        .iter()
-        .position(|byte| *byte == b'\n')
-        .ok_or("NIF header has no newline")?;
-    cursor.pos = line_end + 1;
-    let _version = cursor.u32()?;
-    let _endian = cursor.u8()?;
-    let user_version = cursor.u32()?;
-    let block_count = cursor.u32()? as usize;
-    let _user_version_2 = cursor.u32()?;
-    if user_version >= 10 {
-        cursor.short_string()?;
-        cursor.short_string()?;
-        cursor.short_string()?;
-    }
-    let block_type_count = cursor.u16()? as usize;
-    let mut block_types = Vec::with_capacity(block_type_count);
-    for _ in 0..block_type_count {
-        block_types.push(cursor.string()?);
-    }
-    let mut block_type_indices = Vec::with_capacity(block_count);
-    for _ in 0..block_count {
-        block_type_indices.push(cursor.u16()? as usize);
-    }
-    let mut block_sizes = Vec::with_capacity(block_count);
-    for _ in 0..block_count {
-        block_sizes.push(cursor.u32()? as usize);
-    }
-    let string_count = cursor.u32()? as usize;
-    let _max_string_length = cursor.u32()?;
-    for _ in 0..string_count {
-        let _ = cursor.string()?;
-    }
-    let _unknown = cursor.u32()?;
-
-    let mut offsets = Vec::with_capacity(block_count);
-    let mut data_start = cursor.pos;
-    for size in &block_sizes {
-        offsets.push(data_start);
-        data_start += *size;
-    }
-
-    let mut texture_sets = vec![None; block_count];
-    for (index, offset) in offsets.iter().enumerate() {
-        if block_types[block_type_indices[index]] == "BSShaderTextureSet" {
-            if let Ok(paths) = parse_texture_set(data, *offset) {
-                texture_sets[index] = Some(paths);
-            }
-        }
-    }
-
-    let mut transforms = vec![Transform::IDENTITY; block_count];
-    let mut visited = vec![false; block_count];
-    walk_node(
-        data,
-        0,
-        &offsets,
-        &block_types,
-        &block_type_indices,
-        &Transform::IDENTITY,
-        &mut transforms,
-        &mut visited,
-    );
-
-    let mut meshes = Vec::new();
-    for (index, offset) in offsets.iter().enumerate() {
-        let block_type = block_types[block_type_indices[index]].as_str();
-        if block_type == "BSTriShape" {
-            if let Ok(part) = parse_shape(
-                data,
-                *offset,
-                &texture_sets,
-                &block_type_indices,
-                &transforms[index],
-            ) {
-                meshes.push(part);
-            }
-        }
-    }
-
-    Ok(NifMesh { meshes })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn walk_node(
-    data: &[u8],
-    index: usize,
-    offsets: &[usize],
-    block_types: &[String],
-    block_type_indices: &[usize],
-    parent: &Transform,
-    transforms: &mut [Transform],
-    visited: &mut [bool],
-) {
-    if index >= offsets.len() || visited[index] {
-        return;
-    }
-    visited[index] = true;
-    let block_type = block_types[block_type_indices[index]].as_str();
-    if !matches!(block_type, "NiNode" | "BSFadeNode" | "BSLeafAnimNode") {
-        transforms[index] = *parent;
-        return;
-    }
-    let Ok((local, children)) = parse_node(data, offsets[index]) else {
-        transforms[index] = *parent;
-        return;
-    };
-    let world = parent.then(&local);
-    transforms[index] = world;
-    for child in children {
-        if child >= 0 {
-            walk_node(
-                data,
-                child as usize,
-                offsets,
-                block_types,
-                block_type_indices,
-                &world,
-                transforms,
-                visited,
-            );
-        }
-    }
-}
-
-fn parse_node(
-    data: &[u8],
-    offset: usize,
-) -> std::result::Result<(Transform, Vec<i32>), Box<dyn Error>> {
-    let mut cursor = Cursor::new(data);
-    cursor.pos = offset;
-    let _name = cursor.u32()?;
-    let extra_count = cursor.u32()? as usize;
-    for _ in 0..extra_count {
-        let _ = cursor.u32()?;
-    }
-    let _controller = cursor.i32()?;
-    let _flags = cursor.u32()?;
-    let translation = cursor.vec3()?;
-    let rotation = [
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-    ];
-    let scale = cursor.f32()?;
-    let _collision = cursor.i32()?;
-    let child_count = cursor.u32()? as usize;
-    let mut children = Vec::with_capacity(child_count);
-    for _ in 0..child_count {
-        children.push(cursor.i32()?);
-    }
-    let rotation = glam::Mat3::from_cols(
-        Vec3::new(rotation[0], rotation[3], rotation[6]),
-        Vec3::new(rotation[1], rotation[4], rotation[7]),
-        Vec3::new(rotation[2], rotation[5], rotation[8]),
-    );
-    Ok((
-        Transform {
-            translation,
-            rotation,
-            scale,
-        },
-        children,
-    ))
-}
-
-fn parse_shape(
-    data: &[u8],
-    offset: usize,
-    texture_sets: &[Option<Vec<String>>],
-    block_type_indices: &[usize],
-    parent: &Transform,
-) -> std::result::Result<MeshPart, Box<dyn Error>> {
-    let mut cursor = Cursor::new(data);
-    cursor.pos = offset;
-    let _name = cursor.u32()?;
-    let extra_count = cursor.u32()? as usize;
-    for _ in 0..extra_count {
-        let _ = cursor.u32()?;
-    }
-    let _controller = cursor.i32()?;
-    let _flags = cursor.u32()?;
-    let translation = cursor.vec3()?;
-    let rotation = [
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-        cursor.f32()?,
-    ];
-    let scale = cursor.f32()?;
-    let _collision = cursor.i32()?;
-    for _ in 0..4 {
-        let _ = cursor.f32()?;
-    }
-    let _skin = cursor.i32()?;
-    let shader = cursor.i32()?;
-    let _alpha = cursor.i32()?;
-    let _vertex_desc = cursor.u64()?;
-    let triangles = cursor.u16()? as usize;
-    let vertices = cursor.u16()? as usize;
-    let data_size = cursor.u32()? as usize;
-    if vertices == 0 || triangles == 0 || data_size < triangles * 6 {
-        return Err("empty BSTriShape".into());
-    }
-    let vertex_bytes = data_size - triangles * 6;
-    if vertex_bytes / vertices * vertices != vertex_bytes {
-        return Err("BSTriShape stride is not integral".into());
-    }
-    let stride = vertex_bytes / vertices;
-    if !(28..=96).contains(&stride) {
-        return Err("unsupported BSTriShape stride".into());
-    }
-    let texture = texture_for(shader, texture_sets, block_type_indices);
-    let vertex_start = cursor.pos;
-    let mut out = Vec::with_capacity(vertices);
-    let rotation = glam::Mat3::from_cols(
-        Vec3::new(rotation[0], rotation[3], rotation[6]),
-        Vec3::new(rotation[1], rotation[4], rotation[7]),
-        Vec3::new(rotation[2], rotation[5], rotation[8]),
-    );
-    for index in 0..vertices {
-        let base = vertex_start + index * stride;
-        if base + 28 > data.len() {
-            return Err("BSTriShape vertex data outside file".into());
-        }
-        let position = Vec3::new(
-            read_f32(data, base)?,
-            read_f32(data, base + 4)?,
-            read_f32(data, base + 8)?,
-        );
-        let uv = [
-            f16::from_bits(read_u16(data, base + 16)?).to_f32(),
-            f16::from_bits(read_u16(data, base + 18)?).to_f32(),
-        ];
-        let normal = decode_normal(data, base + 20)?;
-        let color = if stride >= 32 {
-            [
-                data[base + 28] as f32 / 255.0,
-                data[base + 29] as f32 / 255.0,
-                data[base + 30] as f32 / 255.0,
-            ]
-        } else {
-            [1.0, 1.0, 1.0]
-        };
-        let local = Transform {
-            translation,
-            rotation,
-            scale,
-        };
-        out.push(MeshVertex {
-            position: parent.apply(local.apply(position)).to_array(),
-            normal: (parent.rotation * rotation * normal).to_array(),
-            uv,
-            color,
-        });
-    }
-    let index_start = vertex_start + vertices * stride;
-    if index_start + triangles * 6 > data.len() {
-        return Err("BSTriShape index data outside file".into());
-    }
-    let mut indices = Vec::with_capacity(triangles * 3);
-    for index in 0..triangles * 3 {
-        indices.push(read_u16(data, index_start + index * 2)? as u32);
-    }
-    Ok(MeshPart {
-        vertices: out,
-        indices,
-        texture,
-    })
-}
-
-fn texture_for(
-    shader: i32,
-    texture_sets: &[Option<Vec<String>>],
-    block_type_indices: &[usize],
-) -> Option<String> {
-    if shader >= 0 {
-        let shader = shader as usize;
-        if shader + 1 < texture_sets.len()
-            && block_type_indices.get(shader + 1).is_some()
-            && texture_sets[shader + 1].is_some()
-        {
-            if let Some(paths) = &texture_sets[shader + 1] {
-                return paths.first().filter(|path| !path.is_empty()).cloned();
-            }
-        }
-    }
-    texture_sets
-        .iter()
-        .flatten()
-        .flat_map(|paths| paths.iter())
-        .find(|path| !path.is_empty())
-        .cloned()
-}
-
-fn parse_texture_set(
-    data: &[u8],
-    offset: usize,
-) -> std::result::Result<Vec<String>, Box<dyn Error>> {
-    let mut cursor = Cursor::new(data);
-    cursor.pos = offset;
-    let count = cursor.u32()? as usize;
-    let mut paths = Vec::with_capacity(count.min(16));
-    for _ in 0..count {
-        paths.push(cursor.string()?);
-    }
-    Ok(paths)
-}
-
-fn read_u16(data: &[u8], offset: usize) -> std::result::Result<u16, Box<dyn Error>> {
-    let bytes = data.get(offset..offset + 2).ok_or("read past end")?;
-    Ok(u16::from_le_bytes(bytes.try_into().unwrap()))
-}
-
-fn read_f32(data: &[u8], offset: usize) -> std::result::Result<f32, Box<dyn Error>> {
-    let bytes = data.get(offset..offset + 4).ok_or("read past end")?;
-    Ok(f32::from_le_bytes(bytes.try_into().unwrap()))
-}
-
-fn decode_normal(data: &[u8], offset: usize) -> std::result::Result<Vec3, Box<dyn Error>> {
-    let bytes = data.get(offset..offset + 4).ok_or("read past end")?;
-    let normal = Vec3::new(
-        bytes[0] as f32 / 255.0 * 2.0 - 1.0,
-        bytes[1] as f32 / 255.0 * 2.0 - 1.0,
-        bytes[2] as f32 / 255.0 * 2.0 - 1.0,
-    );
-    Ok(normal.normalize_or_zero())
-}
-
-struct Cursor<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Cursor<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-    fn bytes(&mut self, count: usize) -> std::result::Result<&'a [u8], Box<dyn Error>> {
-        let bytes = self
-            .data
-            .get(self.pos..self.pos + count)
-            .ok_or("read past end")?;
-        self.pos += count;
-        Ok(bytes)
-    }
-    fn u8(&mut self) -> std::result::Result<u8, Box<dyn Error>> {
-        Ok(self.bytes(1)?[0])
-    }
-    fn u16(&mut self) -> std::result::Result<u16, Box<dyn Error>> {
-        Ok(u16::from_le_bytes(self.bytes(2)?.try_into().unwrap()))
-    }
-    fn i32(&mut self) -> std::result::Result<i32, Box<dyn Error>> {
-        Ok(i32::from_le_bytes(self.bytes(4)?.try_into().unwrap()))
-    }
-    fn u32(&mut self) -> std::result::Result<u32, Box<dyn Error>> {
-        Ok(u32::from_le_bytes(self.bytes(4)?.try_into().unwrap()))
-    }
-    fn u64(&mut self) -> std::result::Result<u64, Box<dyn Error>> {
-        Ok(u64::from_le_bytes(self.bytes(8)?.try_into().unwrap()))
-    }
-    fn f32(&mut self) -> std::result::Result<f32, Box<dyn Error>> {
-        Ok(f32::from_le_bytes(self.bytes(4)?.try_into().unwrap()))
-    }
-    fn vec3(&mut self) -> std::result::Result<Vec3, Box<dyn Error>> {
-        Ok(Vec3::new(self.f32()?, self.f32()?, self.f32()?))
-    }
-    fn string(&mut self) -> std::result::Result<String, Box<dyn Error>> {
-        let length = self.u32()? as usize;
-        let bytes = self.bytes(length)?;
-        Ok(String::from_utf8_lossy(bytes).into_owned())
-    }
-    fn short_string(&mut self) -> std::result::Result<String, Box<dyn Error>> {
-        let length = self.u8()? as usize;
-        let bytes = self.bytes(length)?;
-        Ok(String::from_utf8_lossy(bytes).into_owned())
-    }
 }

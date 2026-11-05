@@ -1,0 +1,11 @@
+[package]
+name = "oce-nif"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NIF block reader for Open CE"
+
+[dependencies]
+oce-core = { workspace = true }
+glam = "0.27"
+half = "2"

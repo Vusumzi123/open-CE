@@ -7,6 +7,7 @@ mod settings;
 mod terrain;
 mod world;
 
+use std::collections::BTreeMap;
 use std::env;
 use std::error::Error as DynError;
 use std::fs;
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 use oce_bsa::Archive;
 use oce_core::{Error, FormId};
 use oce_data::{AssetLocation, AssetResolver, DataDir, Game, LoadOrder};
+use oce_nif::{classify, BlockRole, Nif};
 use oce_plugin::{strings::StringsFile, Plugin, WalkEntry};
 
 type CliResult = Result<(), Box<dyn DynError>>;
@@ -44,6 +46,7 @@ fn run(args: &[String]) -> CliResult {
         "plugin" => plugin_command(&args[1..]),
         "bsa" => bsa_command(&args[1..]),
         "asset" => asset_command(&args[1..]),
+        "nif" => nif_command(&args[1..]),
         "strings" => strings_command(&args[1..]),
         other => Err(Error::invalid(format!("unknown command '{other}' (try 'oce help')")).into()),
     }
@@ -77,6 +80,168 @@ fn asset_command(args: &[String]) -> CliResult {
     }
 }
 
+fn nif_command(args: &[String]) -> CliResult {
+    match args.first().map(String::as_str) {
+        Some("inspect") => nif_inspect(arg(args, 1, "nif file")?),
+        Some("scan") => nif_scan(&args[1..]),
+        Some(other) => Err(Error::invalid(format!("unknown nif command '{other}'")).into()),
+        None => Err(Error::invalid("usage: oce nif <inspect|scan> ...").into()),
+    }
+}
+
+fn nif_inspect(path: &str) -> CliResult {
+    let bytes = fs::read(path)?;
+    let nif = Nif::parse(&bytes)?;
+    println!("nif:       {path}");
+    println!(
+        "version:   0x{:08X} (user {})",
+        nif.version(),
+        nif.user_version()
+    );
+    println!("blocks:    {}", nif.blocks().len());
+    println!("strings:   {}", nif.strings().len());
+    println!("types:");
+    for (name, count) in nif.histogram() {
+        println!("  {count:5}  {name}");
+    }
+    println!("\ntree:");
+    let mut visited = vec![false; nif.blocks().len()];
+    print_nif_node(&nif, 0, 0, &mut visited);
+    Ok(())
+}
+
+fn print_nif_node(nif: &Nif, index: usize, depth: usize, visited: &mut [bool]) {
+    if index >= nif.blocks().len() || visited[index] {
+        return;
+    }
+    visited[index] = true;
+    let Some(block) = nif.blocks().get(index) else {
+        return;
+    };
+    let indent = "  ".repeat(depth);
+    match nif.node(index) {
+        Ok(Some(node)) => {
+            println!("{indent}{index:4}  {}", block.type_name);
+            for child in node.children {
+                if child < 0 {
+                    println!("{indent}        -1");
+                } else {
+                    print_nif_node(nif, child as usize, depth + 1, visited);
+                }
+            }
+        }
+        Ok(None) if block.type_name == "BSTriShape" => {
+            let texture = nif.texture_for_shape(index).unwrap_or_default();
+            let alpha = nif.alpha_for_shape(index);
+            println!(
+                "{indent}{index:4}  {}  alpha=0x{alpha:04X}  texture={texture}",
+                block.type_name
+            );
+        }
+        Ok(None) => println!("{indent}{index:4}  {}", block.type_name),
+        Err(error) => println!("{indent}{index:4}  {}  <{error}>", block.type_name),
+    }
+}
+
+fn nif_scan(args: &[String]) -> CliResult {
+    let mut game_path: Option<PathBuf> = None;
+    let mut filter = None;
+    let mut limit = usize::MAX;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--filter" => {
+                filter = Some(
+                    args.get(index + 1)
+                        .ok_or_else(|| Error::invalid("missing value for --filter"))?
+                        .to_ascii_lowercase(),
+                );
+                index += 1;
+            }
+            "--limit" => {
+                limit = args
+                    .get(index + 1)
+                    .ok_or_else(|| Error::invalid("missing value for --limit"))?
+                    .parse()
+                    .map_err(|_| Error::invalid("invalid --limit value"))?;
+                index += 1;
+            }
+            value if value.starts_with("--") => {
+                return Err(Error::invalid(format!("unknown nif scan option '{value}'")).into())
+            }
+            value if game_path.is_none() => game_path = Some(PathBuf::from(value)),
+            _ => {
+                return Err(Error::invalid(
+                    "usage: oce nif scan [game] [--limit N] [--filter TEXT]",
+                )
+                .into())
+            }
+        }
+        index += 1;
+    }
+
+    let mut game = match game_path {
+        Some(path) => Game::open(path)?,
+        None => Game::detect()?,
+    };
+    game.load_archives()?;
+
+    let mut scanned = 0usize;
+    let mut failed = 0usize;
+    let mut histogram = BTreeMap::new();
+    let mut unknown = BTreeMap::new();
+
+    'archives: for archive in game.assets.archives() {
+        for (file_index, file) in archive.files().iter().enumerate() {
+            let path = file.path.to_ascii_lowercase();
+            if !path.ends_with(".nif") {
+                continue;
+            }
+            if let Some(filter) = &filter {
+                if !path.contains(filter) {
+                    continue;
+                }
+            }
+            if scanned >= limit {
+                break 'archives;
+            }
+            scanned += 1;
+            match archive
+                .read_file(file_index)
+                .and_then(|bytes| Nif::parse(&bytes))
+            {
+                Ok(nif) => {
+                    for (name, count) in nif.histogram() {
+                        *histogram.entry(name.clone()).or_insert(0) += count;
+                        if classify(&name) == BlockRole::Unknown {
+                            *unknown.entry(name).or_insert(0) += count;
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed += 1;
+                    eprintln!("failed: {}: {error}", file.path);
+                }
+            }
+        }
+    }
+
+    println!("nif scan: {scanned} files, {failed} failed");
+    println!("block types:");
+    for (name, count) in &histogram {
+        println!("  {count:8}  {name}");
+    }
+    if unknown.is_empty() {
+        println!("unknown block types: none");
+    } else {
+        println!("unknown block types:");
+        for (name, count) in &unknown {
+            println!("  {count:8}  {name}");
+        }
+    }
+    Ok(())
+}
+
 fn strings_command(args: &[String]) -> CliResult {
     let path = arg(args, 0, "strings file")?;
     let table = StringsFile::open(path)?;
@@ -94,12 +259,14 @@ fn run_game(args: &[String]) -> CliResult {
     let mut game_path: Option<PathBuf> = None;
     let mut headless = false;
     let mut map_mode = false;
+    let mut test_cell = false;
     let mut frames: Option<usize> = None;
     let mut index = 0usize;
     while index < args.len() {
         match args[index].as_str() {
             "--headless" => headless = true,
             "--map" => map_mode = true,
+            "--test-cell" => test_cell = true,
             "--frames" => {
                 let value = args
                     .get(index + 1)
@@ -124,12 +291,16 @@ fn run_game(args: &[String]) -> CliResult {
             value if game_path.is_none() => game_path = Some(PathBuf::from(value)),
             _ => {
                 return Err(Error::invalid(
-                    "usage: oce run [game] [--headless] [--map] [--frames N]",
+                    "usage: oce run [game] [--headless] [--map] [--test-cell] [--frames N]",
                 )
                 .into())
             }
         }
         index += 1;
+    }
+
+    if map_mode && test_cell {
+        return Err(Error::invalid("--map and --test-cell cannot be combined").into());
     }
 
     let mut game = match game_path {
@@ -158,6 +329,10 @@ fn run_game(args: &[String]) -> CliResult {
     );
     for (path, error) in report.failed.iter().take(5) {
         eprintln!("  {}: {error}", path.display());
+    }
+
+    if test_cell {
+        return run_test_cell(&game, headless, frames);
     }
 
     let plugin = game
@@ -223,6 +398,52 @@ fn run_game(args: &[String]) -> CliResult {
         collision.triangle_count(),
         collision.object_count()
     );
+    println!(
+        "controller: walk {:.0}, run {:.0}, jump {:.0}, gravity {:.0}",
+        controller.walk_speed, controller.run_speed, controller.jump_height, controller.gravity
+    );
+
+    if headless {
+        return Ok(());
+    }
+
+    world::run(terrain, scene, controller, collision, frames)?;
+    Ok(())
+}
+
+fn run_test_cell(game: &Game, headless: bool, frames: Option<usize>) -> CliResult {
+    let terrain = terrain::Terrain::flat();
+    let mesh = terrain.mesh();
+    println!("cell:      phase2-test");
+    println!(
+        "terrain:   flat, {} vertices, {} triangles",
+        mesh.vertices.len(),
+        mesh.indices.len() / 3
+    );
+
+    let scene = scene::Scene::load_test_cell(game)?;
+    println!(
+        "scene:     {} objects, {} textures, {} models loaded, {} failed, {} textures failed",
+        scene.objects.len(),
+        scene.textures.len(),
+        scene.loaded_models,
+        scene.failed_models,
+        scene.failed_textures
+    );
+    if let Some((min, max)) = scene.bounds() {
+        println!(
+            "bounds:    x {:.0}..{:.0}, y {:.0}..{:.0}, z {:.0}..{:.0}",
+            min.x, max.x, min.y, max.y, min.z, max.z
+        );
+    }
+
+    let collision = collision::CollisionWorld::build(&scene);
+    println!(
+        "collision: {} triangles, {} objects",
+        collision.triangle_count(),
+        collision.object_count()
+    );
+    let controller = collision::ControllerConfig::default();
     println!(
         "controller: walk {:.0}, run {:.0}, jump {:.0}, gravity {:.0}",
         controller.walk_speed, controller.run_speed, controller.jump_height, controller.gravity
@@ -698,7 +919,7 @@ fn print_help() {
         r#"oce - Open CE
 
 usage:
-  oce [run] [game] [--map] [--headless] [--frames N]
+  oce [run] [game] [--map] [--test-cell] [--headless] [--frames N]
   oce doctor [game-dir]
   oce plugin info <plugin>
   oce plugin records <plugin> [--type TYPE] [--limit N]
@@ -707,10 +928,13 @@ usage:
   oce bsa list <archive> [--filter TEXT] [--limit N]
   oce bsa extract <archive> <asset> --out <file>
   oce asset find <game-dir> <asset>
+  oce nif inspect <nif-file>
+  oce nif scan [game-dir] [--limit N] [--filter TEXT]
   oce strings <strings-file> [--limit N]
 
 With no command, oce auto-detects Skyrim SE and opens the first-person
-terrain scene. --map opens the 2D cell-density view instead. Controls:
+terrain scene. --map opens the 2D cell-density view instead. --test-cell
+opens the flat Phase 2 test cell with curated models. Controls:
 WASD move, Shift run, Space jump, mouse look, Esc quit. The tools read
 the game's own files. No game assets are bundled.
 "#

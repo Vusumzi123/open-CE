@@ -14,6 +14,7 @@ oce-core = { workspace = true }
 oce-plugin = { workspace = true }
 oce-bsa = { workspace = true }
 oce-data = { workspace = true }
+oce-nif = { workspace = true }
 minifb = "0.29"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.27"
@@ -21,4 +22,3 @@ pollster = "0.3"
 wgpu = "0.19"
 winit = "0.30"
 image = { version = "0.25", default-features = false, features = ["dds"] }
-half = "2"

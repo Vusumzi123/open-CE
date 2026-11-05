@@ -139,8 +139,7 @@ impl Terrain {
         (self.min_x, self.max_x, self.min_z, self.max_z)
     }
 
-    #[cfg(test)]
-    pub fn flat_test() -> Self {
+    pub fn flat() -> Self {
         Self {
             cells: HashMap::from([(
                 (0, 0),
