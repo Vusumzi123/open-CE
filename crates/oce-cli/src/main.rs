@@ -85,9 +85,10 @@ fn asset_command(args: &[String]) -> CliResult {
 fn nif_command(args: &[String]) -> CliResult {
     match args.first().map(String::as_str) {
         Some("inspect") => nif_inspect(arg(args, 1, "nif file")?),
+        Some("skin") => nif_skin(arg(args, 1, "nif file")?),
         Some("scan") => nif_scan(&args[1..]),
         Some(other) => Err(Error::invalid(format!("unknown nif command '{other}'")).into()),
-        None => Err(Error::invalid("usage: oce nif <inspect|scan> ...").into()),
+        None => Err(Error::invalid("usage: oce nif <inspect|skin|scan> ...").into()),
     }
 }
 
@@ -134,6 +135,40 @@ fn nif_inspect(path: &str) -> CliResult {
     println!("\ntree:");
     let mut visited = vec![false; nif.blocks().len()];
     print_nif_node(&nif, 0, 0, &mut visited);
+    Ok(())
+}
+
+fn nif_skin(path: &str) -> CliResult {
+    let bytes = fs::read(path)?;
+    let nif = Nif::parse(&bytes)?;
+    let summaries = nif.skin_summaries()?;
+    if summaries.is_empty() {
+        println!("no skinned shapes");
+        return Ok(());
+    }
+    for summary in summaries {
+        println!(
+            "skin: shape={} bones={} dismember={} has_weights={} resolved_bones={}",
+            summary.shape,
+            summary.bones,
+            summary.dismember,
+            summary.has_vertex_weights,
+            summary.resolved_bones
+        );
+        println!(
+            "descriptor=0x{:016X} stride={} vertices={} weights={}",
+            summary.descriptor, summary.vertex_size, summary.vertices, summary.weights_per_vertex
+        );
+        println!("partitions={}", summary.partitions.len());
+        for (index, partition) in summary.partitions.iter().enumerate() {
+            println!(
+                "  partition={index} vertices={} triangles={}",
+                partition.vertices, partition.triangles
+            );
+        }
+        println!("triangles={}", summary.triangles);
+        println!("bind_deviation={:.6}", summary.bind_deviation);
+    }
     Ok(())
 }
 
@@ -980,6 +1015,7 @@ usage:
   oce bsa extract <archive> <asset> --out <file>
   oce asset find <game-dir> <asset>
   oce nif inspect <nif-file>
+  oce nif skin <nif-file>
   oce nif scan [game-dir] [--limit N] [--filter TEXT]
   oce dds inspect <dds-file>
   oce strings <strings-file> [--limit N]
