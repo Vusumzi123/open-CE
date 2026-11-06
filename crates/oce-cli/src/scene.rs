@@ -117,45 +117,66 @@ impl Scene {
     }
 
     pub fn load_test_cell(game: &Game) -> Result<Self> {
-        const MODELS: &[(&str, [f32; 3], [f32; 3], f32)] = &[
-            (
-                "meshes\\architecture\\farmhouse\\farmhouse01.nif",
-                [600.0, 600.0, 0.0],
-                [0.0, 0.6, 0.0],
-                1.0,
-            ),
-            (
-                "meshes\\architecture\\farmhouse\\farmhouse01walkway.nif",
-                [1400.0, 600.0, 0.0],
-                [0.0, 0.6, 0.0],
-                1.0,
-            ),
-            (
-                "meshes\\landscape\\rocks\\wetrocks\\rockl01wet.nif",
-                [1800.0, 1400.0, 0.0],
-                [0.0, 0.0, 0.0],
-                1.0,
-            ),
-            (
-                "meshes\\landscape\\trees\\treepineforest01.nif",
-                [1000.0, 1800.0, 0.0],
-                [0.0, 0.0, 0.0],
-                1.0,
-            ),
-            (
-                "meshes\\actors\\character\\character assets\\femalebodyastrid_0.nif",
-                [2000.0, 2000.0, 0.0],
-                [0.0, 0.0, 0.0],
-                1.0,
-            ),
+        // NIF is Z-up; rotate around Z here so the render-space Y/Z swap
+        // turns it into a yaw instead of a sideways tilt.
+        struct TestModel {
+            path: &'static str,
+            origin: [f32; 3],
+            rotation: [f32; 3],
+            scale: f32,
+            sink: f32,
+        }
+        const MODELS: &[TestModel] = &[
+            TestModel {
+                path: "meshes\\architecture\\farmhouse\\farmhouse01.nif",
+                origin: [600.0, 600.0, 0.0],
+                rotation: [0.0, 0.0, 0.6],
+                scale: 1.0,
+                sink: 0.0,
+            },
+            TestModel {
+                path: "meshes\\architecture\\farmhouse\\farmhouse01walkway.nif",
+                origin: [1400.0, 600.0, 0.0],
+                rotation: [0.0, 0.0, 0.6],
+                scale: 1.0,
+                sink: 0.0,
+            },
+            TestModel {
+                path: "meshes\\landscape\\rocks\\wetrocks\\rockl01wet.nif",
+                origin: [1800.0, 1400.0, 0.0],
+                rotation: [0.0, 0.0, 0.0],
+                scale: 1.0,
+                sink: 0.0,
+            },
+            TestModel {
+                path: "meshes\\landscape\\trees\\treepineforest01.nif",
+                origin: [1000.0, 1800.0, 0.0],
+                rotation: [0.0, 0.0, 0.0],
+                scale: 1.0,
+                sink: 0.0,
+            },
+            TestModel {
+                path: "meshes\\actors\\character\\character assets\\femalebodyastrid_0.nif",
+                origin: [2000.0, 2000.0, 0.0],
+                rotation: [0.0, 0.0, 0.0],
+                scale: 1.0,
+                sink: 0.0,
+            },
+            TestModel {
+                path: "meshes\\architecture\\farmhouse\\farmhouse01.nif",
+                origin: [2800.0, 3000.0, 0.0],
+                rotation: [0.0, 0.0, 0.0],
+                scale: 1.0,
+                sink: 310.0,
+            },
         ];
 
         let mut objects = Vec::new();
         let mut loaded_models = 0;
         let mut failed_models = 0;
 
-        for &(path, origin, rotation, scale) in MODELS {
-            let bytes = match game.read_asset(path) {
+        for model in MODELS {
+            let bytes = match game.read_asset(model.path) {
                 Ok(Some(bytes)) => bytes,
                 _ => {
                     failed_models += 1;
@@ -170,10 +191,26 @@ impl Scene {
                 }
             };
             loaded_models += 1;
-            let rotation = Quat::from_euler(EulerRot::XYZ, rotation[0], rotation[1], rotation[2]);
-            let origin = Vec3::from_array(origin);
-            for part in nif.meshes() {
-                push_part(&mut objects, part, rotation, origin, scale);
+            let rotation = Quat::from_euler(
+                EulerRot::XYZ,
+                model.rotation[0],
+                model.rotation[1],
+                model.rotation[2],
+            );
+            let parts = nif.meshes();
+            // Put the model's lowest point on the flat test floor.
+            let min_height = parts
+                .iter()
+                .flat_map(|part| part.vertices.iter())
+                .map(|vertex| (rotation * (Vec3::from_array(vertex.position) * model.scale)).z)
+                .fold(f32::INFINITY, f32::min);
+            let mut origin = Vec3::from_array(model.origin);
+            if min_height.is_finite() {
+                origin.z -= min_height;
+            }
+            origin.z -= model.sink;
+            for part in parts {
+                push_part(&mut objects, part, rotation, origin, model.scale);
             }
         }
 

@@ -88,7 +88,6 @@ impl CharacterController {
         if dt == 0.0 {
             return;
         }
-
         let mut wish = Vec3::new(direction.x, 0.0, direction.z);
         if wish.length_squared() > 1e-6 {
             let speed = if running {
@@ -442,7 +441,19 @@ impl CollisionWorld {
                     }
                     let penetration = radius - distance;
                     if deepest.is_none_or(|(best, _)| penetration > best) {
-                        deepest = Some((penetration, direction * penetration));
+                        // A steep surface must not push upward: that cancels gravity
+                        // and lets the capsule hover. Push horizontally instead.
+                        let push = if direction.y > 0.05 && direction.y < max_slope_cos {
+                            let horizontal = Vec3::new(direction.x, 0.0, direction.z);
+                            if horizontal.length_squared() > 1e-8 {
+                                horizontal.normalize()
+                            } else {
+                                direction
+                            }
+                        } else {
+                            direction
+                        };
+                        deepest = Some((penetration, push * penetration));
                     }
                 }
             }
@@ -1232,6 +1243,43 @@ mod tests {
             );
             controller.update(dt, Vec3::ZERO, false, true, &terrain, &world);
             assert!(controller.velocity_y > 0.0, "jump failed at dt {dt}");
+        }
+    }
+    #[test]
+    fn controller_slides_off_a_steep_static_ramp() {
+        let terrain = flat_terrain();
+        for jump in [false, true] {
+            let mut controller = CharacterController::new(&terrain, ControllerConfig::default());
+            let start = controller.position;
+            let world = CollisionWorld {
+                triangles: vec![Triangle::new(
+                    Vec3::new(start.x, start.y, start.z - 200.0),
+                    Vec3::new(start.x, start.y, start.z + 200.0),
+                    Vec3::new(start.x + 400.0, start.y + 800.0, start.z),
+                )
+                .unwrap()],
+                objects: 1,
+            };
+            for frame in 0..240 {
+                controller.update(
+                    1.0 / 60.0,
+                    Vec3::X,
+                    true,
+                    jump && frame == 0,
+                    &terrain,
+                    &world,
+                );
+            }
+            assert!(
+                controller.on_ground,
+                "stuck off ground jump={jump}: pos={:?} vel={}",
+                controller.position, controller.velocity_y
+            );
+            assert!(
+                controller.position.y.abs() < 1.0,
+                "stuck above ground jump={jump}: y={}",
+                controller.position.y
+            );
         }
     }
 }
