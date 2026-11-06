@@ -1,10 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use glam::{EulerRot, Quat, Vec3};
 use oce_core::Result;
 use oce_data::Game;
+use oce_dds::DdsFormat;
 use oce_nif::Nif;
 use oce_plugin::{Plugin, Record, WalkEntry};
+use wgpu::TextureFormat;
 
 pub use oce_nif::MeshVertex;
 
@@ -28,7 +30,8 @@ pub struct Scene {
 pub struct TextureData {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    pub format: TextureFormat,
+    pub data: Vec<u8>,
 }
 
 impl Scene {
@@ -45,6 +48,14 @@ impl Scene {
             }
         }
         seen.then_some((min, max))
+    }
+
+    pub fn texture_format_counts(&self) -> BTreeMap<String, usize> {
+        let mut counts = BTreeMap::new();
+        for texture in self.textures.values() {
+            *counts.entry(format!("{:?}", texture.format)).or_insert(0) += 1;
+        }
+        counts
     }
 
     pub fn load(game: &Game, plugin: &Plugin) -> Result<Self> {
@@ -214,6 +225,11 @@ impl Scene {
             }
         }
 
+        push_texture_probe(
+            &mut objects,
+            "textures\\architecture\\farmhouse\\mushroom02.dds",
+        );
+
         let (textures, failed_textures) = load_textures(game, &objects)?;
         Ok(Self {
             objects,
@@ -223,6 +239,25 @@ impl Scene {
             failed_textures,
         })
     }
+}
+
+fn push_texture_probe(objects: &mut Vec<SceneObject>, texture: &str) {
+    let origin = Vec3::new(2200.0, 0.0, 2400.0);
+    let size = 512.0;
+    let mut vertices = Vec::with_capacity(4);
+    for (u, v) in [(0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0)] {
+        vertices.push(MeshVertex {
+            position: [origin.x + u * size, origin.y + (1.0 - v) * size, origin.z],
+            normal: [0.0, 0.0, 1.0],
+            uv: [u, v],
+            color: [1.0, 1.0, 1.0],
+        });
+    }
+    objects.push(SceneObject {
+        vertices,
+        indices: vec![0, 1, 2, 0, 2, 3],
+        texture: Some(texture.to_string()),
+    });
 }
 
 fn push_part(
@@ -260,6 +295,29 @@ fn load_textures(
             failed_textures += 1;
             continue;
         };
+        match oce_dds::compressed(&bytes) {
+            Ok(Some(texture)) => {
+                let Some(format) = wgpu_format(texture.format) else {
+                    failed_textures += 1;
+                    continue;
+                };
+                textures.insert(
+                    path.clone(),
+                    TextureData {
+                        width: texture.width,
+                        height: texture.height,
+                        format,
+                        data: texture.data,
+                    },
+                );
+                continue;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                failed_textures += 1;
+                continue;
+            }
+        }
         match image::load_from_memory_with_format(&bytes, image::ImageFormat::Dds) {
             Ok(image) => {
                 let image = image.to_rgba8();
@@ -268,7 +326,8 @@ fn load_textures(
                     TextureData {
                         width: image.width(),
                         height: image.height(),
-                        rgba: image.into_raw(),
+                        format: TextureFormat::Rgba8UnormSrgb,
+                        data: image.into_raw(),
                     },
                 );
             }
@@ -276,6 +335,16 @@ fn load_textures(
         }
     }
     Ok((textures, failed_textures))
+}
+
+fn wgpu_format(format: DdsFormat) -> Option<TextureFormat> {
+    match format {
+        DdsFormat::Bc5 => Some(TextureFormat::Bc5RgUnorm),
+        DdsFormat::Bc5Snorm => Some(TextureFormat::Bc5RgSnorm),
+        DdsFormat::Bc7 => Some(TextureFormat::Bc7RgbaUnorm),
+        DdsFormat::Bc7Srgb => Some(TextureFormat::Bc7RgbaUnormSrgb),
+        _ => None,
+    }
 }
 
 struct Reference {
@@ -420,4 +489,27 @@ fn keep_model(model: &str) -> bool {
     ]
     .iter()
     .any(|part| lower.contains(part))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_compressed_dds_formats_to_wgpu() {
+        assert_eq!(wgpu_format(DdsFormat::Bc5), Some(TextureFormat::Bc5RgUnorm));
+        assert_eq!(
+            wgpu_format(DdsFormat::Bc5Snorm),
+            Some(TextureFormat::Bc5RgSnorm)
+        );
+        assert_eq!(
+            wgpu_format(DdsFormat::Bc7),
+            Some(TextureFormat::Bc7RgbaUnorm)
+        );
+        assert_eq!(
+            wgpu_format(DdsFormat::Bc7Srgb),
+            Some(TextureFormat::Bc7RgbaUnormSrgb)
+        );
+        assert_eq!(wgpu_format(DdsFormat::Bc1), None);
+    }
 }

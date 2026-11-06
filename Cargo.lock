@@ -1371,6 +1371,7 @@ dependencies = [
  "oce-bsa",
  "oce-core",
  "oce-data",
+ "oce-dds",
  "oce-nif",
  "oce-plugin",
  "pollster",
@@ -1390,6 +1391,10 @@ dependencies = [
  "oce-core",
  "oce-plugin",
 ]
+
+[[package]]
+name = "oce-dds"
+version = "0.1.0"
 
 [[package]]
 name = "oce-nif"

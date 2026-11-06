@@ -15,6 +15,7 @@ oce-plugin = { workspace = true }
 oce-bsa = { workspace = true }
 oce-data = { workspace = true }
 oce-nif = { workspace = true }
+oce-dds = { workspace = true }
 minifb = "0.29"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.27"

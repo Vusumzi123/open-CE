@@ -1,6 +1,7 @@
 //! Command line front end for the Open CE.
 
 mod collision;
+mod debug;
 mod map;
 mod scene;
 mod settings;
@@ -47,6 +48,7 @@ fn run(args: &[String]) -> CliResult {
         "bsa" => bsa_command(&args[1..]),
         "asset" => asset_command(&args[1..]),
         "nif" => nif_command(&args[1..]),
+        "dds" => dds_command(&args[1..]),
         "strings" => strings_command(&args[1..]),
         other => Err(Error::invalid(format!("unknown command '{other}' (try 'oce help')")).into()),
     }
@@ -87,6 +89,31 @@ fn nif_command(args: &[String]) -> CliResult {
         Some(other) => Err(Error::invalid(format!("unknown nif command '{other}'")).into()),
         None => Err(Error::invalid("usage: oce nif <inspect|scan> ...").into()),
     }
+}
+
+fn dds_command(args: &[String]) -> CliResult {
+    match args.first().map(String::as_str) {
+        Some("inspect") => dds_inspect(arg(args, 1, "dds file")?),
+        Some(other) => Err(Error::invalid(format!("unknown dds command '{other}'")).into()),
+        None => Err(Error::invalid("usage: oce dds inspect <dds-file>").into()),
+    }
+}
+
+fn dds_inspect(path: &str) -> CliResult {
+    let bytes = fs::read(path)?;
+    let info = oce_dds::parse(&bytes)?;
+    println!("dds:       {path}");
+    println!("format:    {}", info.format);
+    println!("size:      {}x{}", info.width, info.height);
+    println!("mips:      {}", info.mip_count);
+    println!("data:      offset {}", info.data_offset);
+    if info.format.is_bc5() || info.format.is_bc7() {
+        let blocks_x = info.width.div_ceil(4) as usize;
+        let blocks_y = info.height.div_ceil(4) as usize;
+        let bytes = blocks_x * blocks_y * 16;
+        println!("compressed: {bytes} bytes, top mip");
+    }
+    Ok(())
 }
 
 fn nif_inspect(path: &str) -> CliResult {
@@ -258,6 +285,7 @@ fn strings_command(args: &[String]) -> CliResult {
 fn run_game(args: &[String]) -> CliResult {
     let mut game_path: Option<PathBuf> = None;
     let mut headless = false;
+    let mut debug = false;
     let mut map_mode = false;
     let mut test_cell = false;
     let mut frames: Option<usize> = None;
@@ -265,6 +293,7 @@ fn run_game(args: &[String]) -> CliResult {
     while index < args.len() {
         match args[index].as_str() {
             "--headless" => headless = true,
+            "--debug" => debug = true,
             "--map" => map_mode = true,
             "--test-cell" => test_cell = true,
             "--frames" => {
@@ -289,18 +318,19 @@ fn run_game(args: &[String]) -> CliResult {
                 return Err(Error::invalid(format!("unknown run option '{value}'")).into())
             }
             value if game_path.is_none() => game_path = Some(PathBuf::from(value)),
-            _ => {
-                return Err(Error::invalid(
-                    "usage: oce run [game] [--headless] [--map] [--test-cell] [--frames N]",
-                )
-                .into())
-            }
+            _ => return Err(Error::invalid(
+                "usage: oce run [game] [--headless] [--debug] [--map] [--test-cell] [--frames N]",
+            )
+            .into()),
         }
         index += 1;
     }
 
     if map_mode && test_cell {
         return Err(Error::invalid("--map and --test-cell cannot be combined").into());
+    }
+    if map_mode && debug {
+        return Err(Error::invalid("--debug requires the 3D scene, not --map").into());
     }
 
     let mut game = match game_path {
@@ -332,7 +362,7 @@ fn run_game(args: &[String]) -> CliResult {
     }
 
     if test_cell {
-        return run_test_cell(&game, headless, frames);
+        return run_test_cell(&game, headless, debug, frames);
     }
 
     let plugin = game
@@ -384,6 +414,7 @@ fn run_game(args: &[String]) -> CliResult {
         scene.failed_models,
         scene.failed_textures
     );
+    print_texture_formats(&scene);
 
     if let Some((min, max)) = scene.bounds() {
         println!(
@@ -404,14 +435,30 @@ fn run_game(args: &[String]) -> CliResult {
     );
 
     if headless {
+        if debug {
+            println!("debug: headless, no movement samples");
+        }
         return Ok(());
     }
 
-    world::run(terrain, scene, controller, collision, frames)?;
+    world::run(terrain, scene, controller, collision, debug, frames)?;
     Ok(())
 }
 
-fn run_test_cell(game: &Game, headless: bool, frames: Option<usize>) -> CliResult {
+fn print_texture_formats(scene: &scene::Scene) {
+    let counts = scene.texture_format_counts();
+    if counts.is_empty() {
+        return;
+    }
+    let text = counts
+        .iter()
+        .map(|(format, count)| format!("{format}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("formats:   {text}");
+}
+
+fn run_test_cell(game: &Game, headless: bool, debug: bool, frames: Option<usize>) -> CliResult {
     let terrain = terrain::Terrain::flat();
     let mesh = terrain.mesh();
     println!("cell:      phase2-test");
@@ -430,6 +477,7 @@ fn run_test_cell(game: &Game, headless: bool, frames: Option<usize>) -> CliResul
         scene.failed_models,
         scene.failed_textures
     );
+    print_texture_formats(&scene);
     if let Some((min, max)) = scene.bounds() {
         println!(
             "bounds:    x {:.0}..{:.0}, y {:.0}..{:.0}, z {:.0}..{:.0}",
@@ -450,10 +498,13 @@ fn run_test_cell(game: &Game, headless: bool, frames: Option<usize>) -> CliResul
     );
 
     if headless {
+        if debug {
+            println!("debug: headless, no movement samples");
+        }
         return Ok(());
     }
 
-    world::run(terrain, scene, controller, collision, frames)?;
+    world::run(terrain, scene, controller, collision, debug, frames)?;
     Ok(())
 }
 
@@ -919,7 +970,7 @@ fn print_help() {
         r#"oce - Open CE
 
 usage:
-  oce [run] [game] [--map] [--test-cell] [--headless] [--frames N]
+  oce [run] [game] [--map] [--test-cell] [--headless] [--debug] [--frames N]
   oce doctor [game-dir]
   oce plugin info <plugin>
   oce plugin records <plugin> [--type TYPE] [--limit N]
@@ -930,11 +981,13 @@ usage:
   oce asset find <game-dir> <asset>
   oce nif inspect <nif-file>
   oce nif scan [game-dir] [--limit N] [--filter TEXT]
+  oce dds inspect <dds-file>
   oce strings <strings-file> [--limit N]
 
 With no command, oce auto-detects Skyrim SE and opens the first-person
 terrain scene. --map opens the 2D cell-density view instead. --test-cell
-opens the flat Phase 2 test cell with curated models. Controls:
+opens the flat Phase 2 test cell with curated models. --debug prints one
+movement and runtime sample line per frame. Controls:
 WASD move, Shift run, Space jump, mouse look, Esc quit. The tools read
 the game's own files. No game assets are bundled.
 "#

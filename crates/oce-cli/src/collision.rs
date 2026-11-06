@@ -129,7 +129,8 @@ impl CharacterController {
                 self.config.max_slope_cos,
                 remaining,
             );
-            if blocked {
+            let falling = !self.on_ground && self.velocity_y <= 0.0;
+            if blocked && !falling {
                 self.position = previous;
                 break;
             }
@@ -1279,6 +1280,46 @@ mod tests {
                 controller.position.y.abs() < 1.0,
                 "stuck above ground jump={jump}: y={}",
                 controller.position.y
+            );
+        }
+    }
+    #[test]
+    fn controller_escapes_when_started_under_a_walkable_overhead() {
+        let terrain = flat_terrain();
+        let x = 2048.0;
+        let z = 2048.0;
+        let a = Vec3::new(x - 200.0, 160.0, z - 200.0);
+        let b = Vec3::new(x + 200.0, 160.0, z - 200.0);
+        let c = Vec3::new(x, 160.0, z + 200.0);
+        for reverse in [false, true] {
+            let (a, b) = if reverse { (b, a) } else { (a, b) };
+            let world = CollisionWorld {
+                triangles: vec![Triangle::new(a, b, c).unwrap()],
+                objects: 1,
+            };
+            let mut controller = CharacterController::new(&terrain, ControllerConfig::default());
+            controller.position = Vec3::new(x, 75.0, z);
+            for _ in 0..240 {
+                controller.update(1.0 / 60.0, Vec3::ZERO, false, false, &terrain, &world);
+            }
+            assert!(
+                controller.on_ground,
+                "stuck under overhead reverse={reverse}: pos={:?} vel={}",
+                controller.position, controller.velocity_y
+            );
+            assert!(
+                controller.position.y.abs() < 1.0,
+                "did not reach the floor reverse={reverse}: pos={:?}",
+                controller.position
+            );
+            let settled = controller.position;
+            for _ in 0..60 {
+                controller.update(1.0 / 60.0, Vec3::X, false, false, &terrain, &world);
+            }
+            assert!(
+                controller.position.x > settled.x + 10.0,
+                "cannot move after escape reverse={reverse}: settled={settled:?} moved={:?}",
+                controller.position
             );
         }
     }

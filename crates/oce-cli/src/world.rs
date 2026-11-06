@@ -13,6 +13,7 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::collision::{CharacterController, CollisionWorld, ControllerConfig};
+use crate::debug::MovementSample;
 use crate::scene::{Scene, TextureData};
 use crate::terrain::{Terrain, Vertex};
 
@@ -96,6 +97,8 @@ struct State {
     mouse_grabbed: bool,
     last_cursor: Option<winit::dpi::PhysicalPosition<f64>>,
     last_frame: Instant,
+    debug: bool,
+    frame: u64,
 }
 
 impl State {
@@ -106,7 +109,11 @@ impl State {
         controller: ControllerConfig,
         collision: CollisionWorld,
         mouse_grabbed: bool,
+        debug: bool,
     ) -> Result<Self, Box<dyn Error>> {
+        let objects = scene.objects.len();
+        let textures = scene.textures.len();
+        let collision_triangles = collision.triangle_count();
         let size = window.inner_size();
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
@@ -121,10 +128,27 @@ impl State {
         .ok_or("no Vulkan adapter")?;
         let info = adapter.get_info();
         println!("gpu:       {:?} {}", info.backend, info.name);
+        if debug {
+            println!(
+                "debug: runtime gpu=\"{}\" backend={:?} objects={} textures={} collision_triangles={}",
+                info.name, info.backend, objects, textures, collision_triangles
+            );
+        }
+        let supports_bc = adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC);
+        if !supports_bc {
+            eprintln!("warning: GPU does not support BC compressed textures");
+        }
+        let required_features = if supports_bc {
+            wgpu::Features::TEXTURE_COMPRESSION_BC
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("oce"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits: wgpu::Limits::default(),
             },
             None,
@@ -315,7 +339,8 @@ impl State {
         let white = TextureData {
             width: 1,
             height: 1,
-            rgba: vec![255, 255, 255, 255],
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            data: vec![255, 255, 255, 255],
         };
         let mut texture_indices: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
@@ -328,6 +353,9 @@ impl State {
         )];
         for path in scene.textures.keys() {
             if let Some(texture) = scene.textures.get(path) {
+                if texture.format.is_compressed() && !supports_bc {
+                    continue;
+                }
                 let view = create_texture_view(&device, &queue, texture);
                 let bind_group =
                     create_texture_bind_group(&device, &object_layout, &view, &sampler);
@@ -401,6 +429,8 @@ impl State {
             mouse_grabbed,
             last_cursor: None,
             last_frame: Instant::now(),
+            debug,
+            frame: 0,
         })
     }
 
@@ -416,7 +446,8 @@ impl State {
 
     fn update(&mut self) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
+        let elapsed = now.duration_since(self.last_frame).as_secs_f32();
+        let dt = elapsed.min(0.1);
         self.last_frame = now;
 
         let mouse = self.mouse_delta;
@@ -444,6 +475,27 @@ impl State {
         let jump = self.key(KeyCode::Space);
         self.player
             .update(dt, direction, running, jump, &self.terrain, &self.collision);
+
+        if self.debug {
+            self.frame += 1;
+            println!(
+                "{}",
+                MovementSample {
+                    frame: self.frame,
+                    dt: elapsed,
+                    position: self.player.position,
+                    eye: self.player.eye(),
+                    velocity_y: self.player.velocity_y,
+                    on_ground: self.player.on_ground,
+                    yaw: self.camera.yaw,
+                    pitch: self.camera.pitch,
+                    direction,
+                    running,
+                    jump,
+                }
+                .line()
+            );
+        }
     }
 
     fn key(&self, code: KeyCode) -> bool {
@@ -587,20 +639,26 @@ fn create_texture_view(
     queue: &wgpu::Queue,
     data: &TextureData,
 ) -> wgpu::TextureView {
+    let width = data.width.max(1);
+    let height = data.height.max(1);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("object texture"),
         size: wgpu::Extent3d {
-            width: data.width.max(1),
-            height: data.height.max(1),
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        format: data.format,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
+    let (block_width, block_height) = data.format.block_dimensions();
+    let bytes_per_block = data.format.block_copy_size(None).unwrap();
+    let bytes_per_row = width.div_ceil(block_width) * bytes_per_block;
+    let rows_per_image = height.div_ceil(block_height);
     queue.write_texture(
         wgpu::ImageCopyTexture {
             texture: &texture,
@@ -608,15 +666,15 @@ fn create_texture_view(
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &data.rgba,
+        &data.data,
         wgpu::ImageDataLayout {
             offset: 0,
-            bytes_per_row: Some(4 * data.width.max(1)),
-            rows_per_image: Some(data.height.max(1)),
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: Some(rows_per_image),
         },
         wgpu::Extent3d {
-            width: data.width.max(1),
-            height: data.height.max(1),
+            width,
+            height,
             depth_or_array_layers: 1,
         },
     );
@@ -672,6 +730,7 @@ struct App {
     state: Option<State>,
     frames: Option<usize>,
     rendered: usize,
+    debug: bool,
 }
 
 impl ApplicationHandler for App {
@@ -703,7 +762,9 @@ impl ApplicationHandler for App {
         let scene = self.scene.take().expect("scene");
         let controller = self.controller.take().expect("controller");
         let collision = self.collision.take().expect("collision");
-        match State::new(window, terrain, scene, controller, collision, grabbed) {
+        match State::new(
+            window, terrain, scene, controller, collision, grabbed, self.debug,
+        ) {
             Ok(state) => self.state = Some(state),
             Err(error) => {
                 eprintln!("oce: cannot initialize Vulkan: {error}");
@@ -782,6 +843,7 @@ pub fn run(
     scene: Scene,
     controller: ControllerConfig,
     collision: CollisionWorld,
+    debug: bool,
     frames: Option<usize>,
 ) -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
@@ -794,6 +856,7 @@ pub fn run(
         state: None,
         frames,
         rendered: 0,
+        debug,
     };
     event_loop.run_app(&mut app)?;
     Ok(())
